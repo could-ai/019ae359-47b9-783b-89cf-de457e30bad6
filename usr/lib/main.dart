@@ -1,123 +1,628 @@
+import 'dart:async';
+import 'dart:math';
+
+import 'package:flame/components.dart';
+import 'package:flame/events.dart';
+import 'package:flame/game.dart';
+import 'package:flame/parallax.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
+import 'package:google_fonts/google_fonts.dart';
+import 'package:shared_preferences/shared_preferences.dart';
+
+// ==========================================
+// 1. MAIN ENTRY POINT & APP STRUCTURE
+// ==========================================
 
 void main() {
-  runApp(const MyApp());
+  WidgetsFlutterBinding.ensureInitialized();
+  // Set full screen and landscape/portrait
+  SystemChrome.setEnabledSystemUIMode(SystemUiMode.immersiveSticky);
+  runApp(const SkyJumpApp());
 }
 
-class MyApp extends StatelessWidget {
-  const MyApp({super.key});
+class SkyJumpApp extends StatelessWidget {
+  const SkyJumpApp({super.key});
 
-  // This widget is the root of your application.
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      title: 'Flutter Demo',
+      title: 'Sky Jump Legends',
       debugShowCheckedModeBanner: false,
       theme: ThemeData(
-        // This is the theme of your application.
-        //
-        // TRY THIS: Try running your application with "flutter run". You'll see
-        // the application has a purple toolbar. Then, without quitting the app,
-        // try changing the seedColor in the colorScheme below to Colors.green
-        // and then invoke "hot reload" (save your changes or press the "hot
-        // reload" button in a Flutter-supported IDE, or press "r" if you used
-        // the command line to start the app).
-        //
-        // Notice that the counter didn't reset back to zero; the application
-        // state is not lost during the reload. To reset the state, use hot
-        // restart instead.
-        //
-        // This works for code too, not just values: Most code changes can be
-        // tested with just a hot reload.
         colorScheme: ColorScheme.fromSeed(seedColor: Colors.deepPurple),
+        useMaterial3: true,
+        textTheme: GoogleFonts.cairoTextTheme(), // Arabic friendly font
       ),
-      initialRoute: '/',
-      routes: {
-        '/': (context) => const MyHomePage(title: 'Flutter Demo Home Page'),
-      },
+      home: const GameContainer(),
     );
   }
 }
 
-class MyHomePage extends StatefulWidget {
-  const MyHomePage({super.key, required this.title});
+// ==========================================
+// 2. GAME CONTAINER & UI OVERLAYS
+// ==========================================
 
-  // This widget is the home page of your application. It is stateful, meaning
-  // that it has a State object (defined below) that contains fields that affect
-  // how it looks.
-
-  // This class is the configuration for the state. It holds the values (in this
-  // case the title) provided by the parent (in this case the App widget) and
-  // used by the build method of the State. Fields in a Widget subclass are
-  // always marked "final".
-
-  final String title;
+class GameContainer extends StatefulWidget {
+  const GameContainer({super.key});
 
   @override
-  State<MyHomePage> createState() => _MyHomePageState();
+  State<GameContainer> createState() => _GameContainerState();
 }
 
-class _MyHomePageState extends State<MyHomePage> {
-  int _counter = 0;
+class _GameContainerState extends State<GameContainer> {
+  late SkyJumpGame _game;
 
-  void _incrementCounter() {
-    setState(() {
-      // This call to setState tells the Flutter framework that something has
-      // changed in this State, which causes it to rerun the build method below
-      // so that the display can reflect the updated values. If we changed
-      // _counter without calling setState(), then the build method would not be
-      // called again, and so nothing would appear to happen.
-      _counter++;
-    });
+  @override
+  void initState() {
+    super.initState();
+    _game = SkyJumpGame();
   }
 
   @override
   Widget build(BuildContext context) {
-    // This method is rerun every time setState is called, for instance as done
-    // by the _incrementCounter method above.
-    //
-    // The Flutter framework has been optimized to make rerunning build methods
-    // fast, so that you can just rebuild anything that needs updating rather
-    // than having to individually change instances of widgets.
     return Scaffold(
-      appBar: AppBar(
-        // TRY THIS: Try changing the color here to a specific color (to
-        // Colors.amber, perhaps?) and trigger a hot reload to see the AppBar
-        // change color while the other colors stay the same.
-        backgroundColor: Theme.of(context).colorScheme.inversePrimary,
-        // Here we take the value from the MyHomePage object that was created by
-        // the App.build method, and use it to set our appbar title.
-        title: Text(widget.title),
+      body: GameWidget(
+        game: _game,
+        overlayBuilderMap: {
+          'MainMenu': (context, SkyJumpGame game) => MainMenuOverlay(game: game),
+          'HUD': (context, SkyJumpGame game) => HudOverlay(game: game),
+          'GameOver': (context, SkyJumpGame game) => GameOverOverlay(game: game),
+          'Shop': (context, SkyJumpGame game) => ShopOverlay(game: game),
+        },
+        initialActiveOverlays: const ['MainMenu'],
       ),
-      body: Center(
-        // Center is a layout widget. It takes a single child and positions it
-        // in the middle of the parent.
+    );
+  }
+}
+
+// ==========================================
+// 3. FLAME GAME LOGIC (THE ENGINE)
+// ==========================================
+
+class SkyJumpGame extends FlameGame with HasCollisionDetection, TapDetector {
+  // Game State
+  double score = 0;
+  int coins = 0;
+  int diamonds = 0;
+  double highestScore = 0;
+  
+  // Configuration
+  late PlayerComponent player;
+  late ObjectManager objectManager;
+  
+  // World Settings
+  double gravity = 1200;
+  double jumpForce = -750;
+  bool isGameOver = false;
+  bool isPaused = false;
+
+  // Selected Character (0: Dog, 1: Cat, 2: Panda, 3: Rabbit)
+  int selectedCharacterIndex = 0;
+  final List<CharacterConfig> characters = [
+    CharacterConfig(name: "الكلب الشجاع", color: Colors.orange, price: 0, ability: "توازن"),
+    CharacterConfig(name: "القط السريع", color: Colors.blue, price: 100, ability: "قفزة مزدوجة"),
+    CharacterConfig(name: "الباندا", color: Colors.black, price: 500, ability: "درع"),
+    CharacterConfig(name: "الأرنب", color: Colors.pink, price: 1000, ability: "قفزة عالية"),
+  ];
+
+  @override
+  Future<void> onLoad() async {
+    await super.onLoad();
+    
+    // Load saved data
+    final prefs = await SharedPreferences.getInstance();
+    coins = prefs.getInt('coins') ?? 0;
+    highestScore = prefs.getDouble('high_score') ?? 0;
+    
+    // Setup Camera
+    camera.viewfinder.anchor = Anchor.center;
+    
+    // Start Game Loop
+    resetGame();
+  }
+
+  void resetGame() {
+    // Clear existing
+    children.whereType<Component>().forEach((c) => c.removeFromParent());
+    
+    isGameOver = false;
+    score = 0;
+    
+    // Add Background (Simple gradient for now, can be parallax)
+    add(RectangleComponent(
+      size: size,
+      paint: Paint()..color = const Color(0xFF1A1A2E), // Dark Night Sky
+    ));
+
+    // Add Player
+    player = PlayerComponent(character: characters[selectedCharacterIndex]);
+    add(player);
+    
+    // Add Object Manager (Spawns platforms/enemies)
+    objectManager = ObjectManager();
+    add(objectManager);
+
+    // Initial Platform
+    add(PlatformComponent(position: Vector2(0, 200), type: PlatformType.normal));
+    
+    resumeEngine();
+  }
+
+  void startGame() {
+    overlays.remove('MainMenu');
+    overlays.remove('GameOver');
+    overlays.remove('Shop');
+    overlays.add('HUD');
+    resetGame();
+  }
+
+  void gameOver() async {
+    if (isGameOver) return;
+    isGameOver = true;
+    pauseEngine();
+    
+    // Save Score
+    if (score > highestScore) {
+      highestScore = score;
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setDouble('high_score', highestScore);
+    }
+    // Save Coins
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setInt('coins', coins);
+
+    overlays.remove('HUD');
+    overlays.add('GameOver');
+  }
+
+  @override
+  void update(double dt) {
+    super.update(dt);
+    if (isGameOver) return;
+
+    // Update Score based on height
+    if (player.y < -score) {
+      score = -player.y;
+    }
+
+    // Camera Follow Player (Only go up)
+    if (player.y < camera.viewfinder.position.y + 100) {
+       camera.viewfinder.position = Vector2(0, player.y - 100);
+    }
+
+    // Death Condition (Fall below camera)
+    if (player.y > camera.viewfinder.position.y + size.y / 2) {
+      gameOver();
+    }
+  }
+
+  @override
+  void onTapDown(TapDownInfo info) {
+    // Simple tap to move towards tap side (simplified for mobile)
+    if (info.eventPosition.global.x < size.x / 2) {
+      player.moveLeft();
+    } else {
+      player.moveRight();
+    }
+  }
+  
+  @override
+  void onTapUp(TapUpInfo info) {
+    player.stopMoving();
+  }
+}
+
+// ==========================================
+// 4. GAME COMPONENTS (PLAYER, PLATFORMS)
+// ==========================================
+
+class CharacterConfig {
+  final String name;
+  final Color color;
+  final int price;
+  final String ability;
+  CharacterConfig({required this.name, required this.color, required this.price, required this.ability});
+}
+
+class PlayerComponent extends PositionComponent with HasGameRef<SkyJumpGame>, CollisionCallbacks {
+  final CharacterConfig character;
+  Vector2 velocity = Vector2.zero();
+  double moveSpeed = 400;
+  int moveDirection = 0; // -1 left, 1 right, 0 stop
+
+  PlayerComponent({required this.character}) : super(size: Vector2(40, 40), anchor: Anchor.center);
+
+  @override
+  Future<void> onLoad() async {
+    // Visual representation (Circle)
+    add(CircleComponent(
+      radius: 20,
+      paint: Paint()..color = character.color,
+    ));
+    // Eyes
+    add(CircleComponent(radius: 4, position: Vector2(10, 12), paint: Paint()..color = Colors.white));
+    add(CircleComponent(radius: 4, position: Vector2(26, 12), paint: Paint()..color = Colors.white));
+    
+    // Hitbox
+    add(RectangleHitbox());
+    position = Vector2(0, 0);
+  }
+
+  void moveLeft() => moveDirection = -1;
+  void moveRight() => moveDirection = 1;
+  void stopMoving() => moveDirection = 0;
+
+  void jump(double forceMultiplier) {
+    velocity.y = gameRef.jumpForce * forceMultiplier;
+    // Play sound effect here (mock)
+  }
+
+  @override
+  void update(double dt) {
+    super.update(dt);
+
+    // Horizontal Movement
+    velocity.x = moveDirection * moveSpeed;
+    
+    // Gravity
+    velocity.y += gameRef.gravity * dt;
+
+    // Apply Velocity
+    position += velocity * dt;
+
+    // Screen Wrap (Pacman style)
+    if (position.x > gameRef.size.x / 2) position.x = -gameRef.size.x / 2;
+    if (position.x < -gameRef.size.x / 2) position.x = gameRef.size.x / 2;
+  }
+
+  @override
+  void onCollision(Set<Vector2> intersectionPoints, PositionComponent other) {
+    super.onCollision(intersectionPoints, other);
+    
+    // Only jump if falling down and hitting top of platform
+    if (velocity.y > 0 && other is PlatformComponent) {
+      // Check if we are above the platform
+      if (position.y < other.position.y - other.size.y / 2) {
+        if (other.type == PlatformType.breakable) {
+          other.breakPlatform();
+        } 
+        double boost = 1.0;
+        if (other.type == PlatformType.boost) boost = 1.5;
+        jump(boost);
+      }
+    } else if (other is EnemyComponent) {
+      gameRef.gameOver();
+    } else if (other is CoinComponent) {
+      gameRef.coins++;
+      other.removeFromParent();
+    }
+  }
+}
+
+enum PlatformType { normal, moving, breakable, boost }
+
+class PlatformComponent extends PositionComponent with HasGameRef<SkyJumpGame> {
+  final PlatformType type;
+  double speed = 100;
+  int direction = 1;
+
+  PlatformComponent({required Vector2 position, required this.type}) 
+      : super(position: position, size: Vector2(80, 20), anchor: Anchor.center);
+
+  @override
+  Future<void> onLoad() async {
+    Color color = Colors.green;
+    if (type == PlatformType.moving) color = Colors.blue;
+    if (type == PlatformType.breakable) color = Colors.brown;
+    if (type == PlatformType.boost) color = Colors.redAccent;
+
+    add(RectangleComponent(
+      size: size,
+      paint: Paint()..color = color,
+    ));
+    add(RectangleHitbox());
+  }
+
+  @override
+  void update(double dt) {
+    super.update(dt);
+    if (type == PlatformType.moving) {
+      position.x += speed * direction * dt;
+      if (position.x > gameRef.size.x / 2 - 50 || position.x < -gameRef.size.x / 2 + 50) {
+        direction *= -1;
+      }
+    }
+    
+    // Cleanup if too far below
+    if (position.y > gameRef.camera.viewfinder.position.y + gameRef.size.y) {
+      removeFromParent();
+    }
+  }
+
+  void breakPlatform() {
+    removeFromParent();
+    // Add particle effect here
+  }
+}
+
+class CoinComponent extends PositionComponent with HasGameRef<SkyJumpGame> {
+  CoinComponent({required Vector2 position}) 
+      : super(position: position, size: Vector2(20, 20), anchor: Anchor.center);
+
+  @override
+  Future<void> onLoad() async {
+    add(CircleComponent(radius: 10, paint: Paint()..color = Colors.yellow));
+    add(CircleComponent(radius: 7, paint: Paint()..color = Colors.amber));
+    add(RectangleHitbox());
+  }
+}
+
+class EnemyComponent extends PositionComponent with HasGameRef<SkyJumpGame> {
+  EnemyComponent({required Vector2 position}) 
+      : super(position: position, size: Vector2(40, 30), anchor: Anchor.center);
+
+  @override
+  Future<void> onLoad() async {
+    // Bird shape
+    add(RectangleComponent(size: size, paint: Paint()..color = Colors.red));
+    add(RectangleHitbox());
+  }
+}
+
+class ObjectManager extends Component with HasGameRef<SkyJumpGame> {
+  double nextSpawnY = 0;
+
+  @override
+  void update(double dt) {
+    super.update(dt);
+    
+    // Spawn platforms as we go up
+    final cameraTop = gameRef.camera.viewfinder.position.y - gameRef.size.y / 2;
+    
+    while (nextSpawnY > cameraTop - 100) {
+      spawnLayer(nextSpawnY);
+      nextSpawnY -= 120; // Distance between platforms
+    }
+  }
+
+  void spawnLayer(double y) {
+    final r = Random();
+    double x = (r.nextDouble() * gameRef.size.x) - (gameRef.size.x / 2);
+    
+    // Determine type
+    PlatformType type = PlatformType.normal;
+    if (r.nextDouble() < 0.2) type = PlatformType.moving;
+    else if (r.nextDouble() < 0.1) type = PlatformType.breakable;
+    else if (r.nextDouble() < 0.05) type = PlatformType.boost;
+
+    gameRef.add(PlatformComponent(position: Vector2(x, y), type: type));
+
+    // Chance for Coin
+    if (r.nextDouble() < 0.3) {
+      gameRef.add(CoinComponent(position: Vector2(x, y - 40)));
+    }
+
+    // Chance for Enemy (only higher up)
+    if (gameRef.score > 1000 && r.nextDouble() < 0.05) {
+       gameRef.add(EnemyComponent(position: Vector2(x + (r.nextBool() ? 100 : -100), y - 100)));
+    }
+  }
+}
+
+// ==========================================
+// 5. UI OVERLAYS (WIDGETS)
+// ==========================================
+
+class MainMenuOverlay extends StatelessWidget {
+  final SkyJumpGame game;
+  const MainMenuOverlay({super.key, required this.game});
+
+  @override
+  Widget build(BuildContext context) {
+    return Center(
+      child: Container(
+        padding: const EdgeInsets.all(20),
+        decoration: BoxDecoration(
+          color: Colors.black.withOpacity(0.8),
+          borderRadius: BorderRadius.circular(20),
+          border: Border.all(color: Colors.purpleAccent, width: 2),
+        ),
         child: Column(
-          // Column is also a layout widget. It takes a list of children and
-          // arranges them vertically. By default, it sizes itself to fit its
-          // children horizontally, and tries to be as tall as its parent.
-          //
-          // Column has various properties to control how it sizes itself and
-          // how it positions its children. Here we use mainAxisAlignment to
-          // center the children vertically; the main axis here is the vertical
-          // axis because Columns are vertical (the cross axis would be
-          // horizontal).
-          //
-          // TRY THIS: Invoke "debug painting" (choose the "Toggle Debug Paint"
-          // action in the IDE, or press "p" in the console), to see the
-          // wireframe for each widget.
-          mainAxisAlignment: MainAxisAlignment.center,
-          children: <Widget>[
-            const Text('You have pushed the button this many times:'),
-            Text('$_counter', style: Theme.of(context).textTheme.headlineMedium),
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const Text("SKY JUMP LEGENDS", style: TextStyle(fontSize: 32, fontWeight: FontWeight.bold, color: Colors.white)),
+            const Text("أساطير القفز", style: TextStyle(fontSize: 24, color: Colors.purpleAccent)),
+            const SizedBox(height: 20),
+            Text("أعلى نتيجة: ${game.highestScore.toInt()}", style: const TextStyle(color: Colors.yellow, fontSize: 18)),
+            const SizedBox(height: 30),
+            ElevatedButton(
+              onPressed: () => game.startGame(),
+              style: ElevatedButton.styleFrom(backgroundColor: Colors.green, padding: const EdgeInsets.symmetric(horizontal: 50, vertical: 15)),
+              child: const Text("ابدأ اللعب", style: TextStyle(fontSize: 24, color: Colors.white)),
+            ),
+            const SizedBox(height: 10),
+            ElevatedButton(
+              onPressed: () {
+                game.overlays.remove('MainMenu');
+                game.overlays.add('Shop');
+              },
+              style: ElevatedButton.styleFrom(backgroundColor: Colors.orange),
+              child: const Text("المتجر والشخصيات", style: TextStyle(color: Colors.white)),
+            ),
           ],
         ),
       ),
-      floatingActionButton: FloatingActionButton(
-        onPressed: _incrementCounter,
-        tooltip: 'Increment',
-        child: const Icon(Icons.add),
-      ), // This trailing comma makes auto-formatting nicer for build methods.
+    );
+  }
+}
+
+class GameOverOverlay extends StatelessWidget {
+  final SkyJumpGame game;
+  const GameOverOverlay({super.key, required this.game});
+
+  @override
+  Widget build(BuildContext context) {
+    return Center(
+      child: Container(
+        padding: const EdgeInsets.all(20),
+        decoration: BoxDecoration(
+          color: Colors.red.withOpacity(0.9),
+          borderRadius: BorderRadius.circular(20),
+        ),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const Text("GAME OVER", style: TextStyle(fontSize: 40, fontWeight: FontWeight.bold, color: Colors.white)),
+            const Text("انتهت اللعبة", style: TextStyle(fontSize: 24, color: Colors.white)),
+            const SizedBox(height: 20),
+            Text("النتيجة: ${game.score.toInt()}", style: const TextStyle(fontSize: 30, color: Colors.yellow)),
+            const SizedBox(height: 30),
+            Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                ElevatedButton.icon(
+                  onPressed: () => game.startGame(),
+                  icon: const Icon(Icons.refresh),
+                  label: const Text("إعادة"),
+                ),
+                const SizedBox(width: 10),
+                ElevatedButton.icon(
+                  onPressed: () {
+                    game.overlays.remove('GameOver');
+                    game.overlays.add('MainMenu');
+                  },
+                  icon: const Icon(Icons.home),
+                  label: const Text("الرئيسية"),
+                ),
+              ],
+            )
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class HudOverlay extends StatelessWidget {
+  final SkyJumpGame game;
+  const HudOverlay({super.key, required this.game});
+
+  @override
+  Widget build(BuildContext context) {
+    return SafeArea(
+      child: Padding(
+        padding: const EdgeInsets.all(10.0),
+        child: Column(
+          children: [
+            Row(
+              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+              children: [
+                ValueListenableBuilder(
+                  valueListenable: ValueNotifier(game.score), // In real app use proper notifier
+                  builder: (context, value, child) => Text("Score: ${game.score.toInt()}", 
+                    style: const TextStyle(color: Colors.white, fontSize: 24, fontWeight: FontWeight.bold, shadows: [Shadow(blurRadius: 5, color: Colors.black)])),
+                ),
+                Row(
+                  children: [
+                    const Icon(Icons.monetization_on, color: Colors.yellow),
+                    Text(" ${game.coins}", style: const TextStyle(color: Colors.white, fontSize: 20)),
+                  ],
+                )
+              ],
+            ),
+            const Spacer(),
+            // Touch Controls Hint
+            const Row(
+              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+              children: [
+                Icon(Icons.arrow_back_ios, color: Colors.white54, size: 40),
+                Icon(Icons.arrow_forward_ios, color: Colors.white54, size: 40),
+              ],
+            )
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class ShopOverlay extends StatefulWidget {
+  final SkyJumpGame game;
+  const ShopOverlay({super.key, required this.game});
+
+  @override
+  State<ShopOverlay> createState() => _ShopOverlayState();
+}
+
+class _ShopOverlayState extends State<ShopOverlay> {
+  @override
+  Widget build(BuildContext context) {
+    return Center(
+      child: Container(
+        width: 350,
+        height: 600,
+        padding: const EdgeInsets.all(16),
+        decoration: BoxDecoration(
+          color: Colors.white,
+          borderRadius: BorderRadius.circular(16),
+          boxShadow: const [BoxShadow(color: Colors.black45, blurRadius: 10)],
+        ),
+        child: Column(
+          children: [
+            Row(
+              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+              children: [
+                const Text("المتجر", style: TextStyle(fontSize: 28, fontWeight: FontWeight.bold)),
+                IconButton(
+                  icon: const Icon(Icons.close),
+                  onPressed: () {
+                    widget.game.overlays.remove('Shop');
+                    widget.game.overlays.add('MainMenu');
+                  },
+                )
+              ],
+            ),
+            Text("رصيدك: ${widget.game.coins} عملة", style: const TextStyle(color: Colors.orange, fontSize: 18, fontWeight: FontWeight.bold)),
+            const Divider(),
+            Expanded(
+              child: ListView.builder(
+                itemCount: widget.game.characters.length,
+                itemBuilder: (context, index) {
+                  final char = widget.game.characters[index];
+                  final isSelected = widget.game.selectedCharacterIndex == index;
+                  
+                  return Card(
+                    color: isSelected ? Colors.green.shade100 : Colors.white,
+                    child: ListTile(
+                      leading: CircleAvatar(backgroundColor: char.color),
+                      title: Text(char.name),
+                      subtitle: Text("القدرة: ${char.ability}"),
+                      trailing: isSelected 
+                        ? const Icon(Icons.check_circle, color: Colors.green)
+                        : ElevatedButton(
+                            onPressed: () {
+                              setState(() {
+                                widget.game.selectedCharacterIndex = index;
+                              });
+                            },
+                            child: Text(char.price == 0 ? "اختر" : "${char.price}"),
+                          ),
+                    ),
+                  );
+                },
+              ),
+            ),
+            const Divider(),
+            const Text("المهام اليومية", style: TextStyle(fontWeight: FontWeight.bold)),
+            const ListTile(
+              leading: Icon(Icons.task_alt, color: Colors.green),
+              title: Text("اقفز 100 مرة"),
+              trailing: Text("50 عملة"),
+            ),
+          ],
+        ),
+      ),
     );
   }
 }
